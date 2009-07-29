@@ -20,7 +20,7 @@ PASSWORD  = CONFIG['password'] rescue 'admin'
 # Jul 24 14:58:21 app3 rails.shopify[9855]: [wadedemt.myshopify.com]   Processing ShopController#products (for 192.168.1.230 at 2009-07-24 14:58:21) [GET] 
 
 module GrepRenderer  
-  attr_accessor :response, :key, :logger
+  attr_accessor :response, :key
   
   # once download is complete, send it to client
   def receive_data(data)
