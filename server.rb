@@ -5,17 +5,13 @@ require 'erb'
 require 'cgi'
 require 'yaml'
 require 'base64'
-    require 'pp'
+require 'socket'
+require 'lib/pid_handling'
+require 'lib/basic_auth'
+require 'lib/string_ext'
 
-class String #:nodoc:
-  def blank?
-    self !~ /\S/
-  end
 
-end
-
-CONFIG = YAML.load(open('./config/config.yml').read)
-
+CONFIG    = YAML.load(open('./config/config.yml').read)
 LOG_FILES = CONFIG['log_files'] rescue [] 
 USERNAME  = CONFIG['username'] rescue 'admin'
 PASSWORD  = CONFIG['password'] rescue 'admin'
@@ -24,16 +20,17 @@ PASSWORD  = CONFIG['password'] rescue 'admin'
 # Jul 24 14:58:21 app3 rails.shopify[9855]: [wadedemt.myshopify.com]   Processing ShopController#products (for 192.168.1.230 at 2009-07-24 14:58:21) [GET] 
 
 module GrepRenderer  
-  attr_accessor :response
+  attr_accessor :response, :key, :logger
   
   # once download is complete, send it to client
   def receive_data(data)
-    # parse it nicely
+    Handler.add_pid(get_status.pid, key)
     response.chunk ERB::Util.h(data).gsub(/\n/, '<br/>')
     response.send_chunks
   end
 
   def unbind
+    Handler.remove_pid(get_status.pid)
     response.chunk '<hr><p id="done">Done</p><script>$("spinner").hide();</script></body></html>'
     response.chunk ''
     response.send_chunks
@@ -54,8 +51,10 @@ class RailsLineParser
 end
 
 
-class Handler  < EventMachine::Connection
+class Handler < EventMachine::Connection
   include EventMachine::HttpServer
+  include BasicAuth
+  extend PidHandling
   
   LeadIn = ' ' * 1024  
   MimeTypes = {
@@ -67,13 +66,17 @@ class Handler  < EventMachine::Connection
     '.bitmap' =>  'image/x-ms-bmp'
   }
   
+  def logger(msg)
+    puts msg
+  end
+  
   def logfiles
     @@logfiles = LOG_FILES.map {|f| Dir[f] }.flatten.compact.uniq
   end
   
   def parse_params
     params = ENV['QUERY_STRING'].split('&').inject({}) {|p, s| k,v=s.split('=');p[k.to_s]=CGI.unescape(v.to_s);p}
-    puts "params #{params.inspect}"
+    logger "params #{params.inspect}"
     params
   end
 
@@ -129,19 +132,27 @@ class Handler  < EventMachine::Connection
   end
  
   def process_http_request
+    logger "== request: #{ENV['PATH_INFO']}"
+    connection_key = Socket.unpack_sockaddr_in(get_peername).last
+    
     response = EventMachine::DelegatedHttpResponse.new( self )
     response.headers['Content-Type'] = 'text/html'
     response.status = 200
-
-    raise NotAuthenticatedError unless authenticate(@http_headers)
+    
     
     case ENV["PATH_INFO"]
     when '/'
+      raise NotAuthenticatedError unless authenticate(@http_headers)
+      Handler.kill_existing_process(connection_key)
+
       response.headers['Content-Type'] = 'text/html'
       response.content = welcome_page
       response.send_response
       
-    when '/search'      
+    when '/search'
+      raise NotAuthenticatedError unless authenticate(@http_headers)
+      Handler.kill_existing_process(connection_key)
+
       @params = parse_params || {}
       if @params['q'].nil? || @params['file'].nil?
         response.content = welcome_page
@@ -153,9 +164,11 @@ class Handler  < EventMachine::Connection
         response.chunk results_page # display page header
         
         cmd = build_grep_request(@params)
-        puts "Running: #{cmd}"
+        logger "Running: #{cmd}"
+        
         EventMachine::popen(cmd, GrepRenderer) do |grepper|
-          grepper.response = response 
+          grepper.key = connection_key
+          grepper.response = response
         end
       end
       
@@ -178,7 +191,7 @@ class Handler  < EventMachine::Connection
       end
       
     else
-      raise NotFoundError
+      raise NotFoundError # default
     end
     
   rescue InvalidParameterError => e
@@ -202,29 +215,8 @@ class Handler  < EventMachine::Connection
     response.status = 401
     response.send_response
   end
-  
-  
-  
-  def decode_credentials(request)
-    Base64.decode64(request).split.last
-  end
-    
-  def user_name_and_password(request)
-    decode_credentials(request).split(/:/, 2)
-  end
-  
-  def authenticate(http_header)
-    headers = http_header.split("\000")
-    auth_header = headers.detect {|head| head =~ /Authorization: / }
-    auth_request = auth_header.nil? ? "" : auth_header.split("Authorization: Basic ").last    
-    if auth_request.blank?
-      false
-    else
-      user_name_and_password(auth_request) == [USERNAME, PASSWORD]
-    end
-  end
-  
 end
+
 
 class InvalidParameterError < StandardError; end
 class NotFoundError < StandardError; end
