@@ -24,13 +24,13 @@ module GrepRenderer
   
   # once download is complete, send it to client
   def receive_data(data)
-    Handler.add_pid(get_status.pid, key)
+    #Handler.add_pid(get_status.pid, key)
     response.chunk ERB::Util.h(data).gsub(/\n/, '<br/>')
     response.send_chunks
   end
 
   def unbind
-    Handler.remove_pid(get_status.pid)
+    #Handler.remove_pid(get_status.pid)
     response.chunk '<hr><p id="done">Done</p><script>$("spinner").hide();</script></body></html>'
     response.chunk ''
     response.send_chunks
@@ -55,6 +55,8 @@ class Handler < EventMachine::Connection
   include EventMachine::HttpServer
   include BasicAuth
   extend PidHandling
+  
+  attr_accessor :grepper
   
   LeadIn = ' ' * 1024  
   MimeTypes = {
@@ -85,7 +87,7 @@ class Handler < EventMachine::Connection
   end
   
   def results_page
-    @@results_page = ERB.new(open('./views/results.html.erb').read).result(binding)
+    ERB.new(open('./views/results.html.erb').read).result(binding)
   end
  
   # tool - zgrep, bzgrep or grep
@@ -131,6 +133,15 @@ class Handler < EventMachine::Connection
     query = Regexp.escape(query_string).gsub(/'/, "").gsub(/"/, "")
   end
  
+  def unbind
+    if @grepper
+      puts "UNBIND"
+      #close_connection
+    else
+      puts "nothing to unbind"
+    end
+  end
+ 
   def process_http_request
     logger "== request: #{ENV['PATH_INFO']}"
     connection_key = Socket.unpack_sockaddr_in(get_peername).last
@@ -143,7 +154,7 @@ class Handler < EventMachine::Connection
     case ENV["PATH_INFO"]
     when '/'
       raise NotAuthenticatedError unless authenticate(@http_headers)
-      Handler.kill_existing_process(connection_key)
+      #Handler.kill_existing_process(connection_key)
 
       response.headers['Content-Type'] = 'text/html'
       response.content = welcome_page
@@ -151,7 +162,7 @@ class Handler < EventMachine::Connection
       
     when '/search'
       raise NotAuthenticatedError unless authenticate(@http_headers)
-      Handler.kill_existing_process(connection_key)
+      #Handler.kill_existing_process(connection_key)
 
       @params = parse_params || {}
       if @params['q'].nil? || @params['file'].nil?
@@ -167,8 +178,9 @@ class Handler < EventMachine::Connection
         logger "Running: #{cmd}"
         
         EventMachine::popen(cmd, GrepRenderer) do |grepper|
-          grepper.key = connection_key
-          grepper.response = response
+          @grepper = grepper
+          @grepper.key = connection_key
+          @grepper.response = response
         end
       end
       
